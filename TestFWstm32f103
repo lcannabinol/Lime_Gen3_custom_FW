@@ -1,0 +1,96 @@
+#include "stm32f10x.h"
+#include <stdio.h>
+
+void UART1_Init_NoRemap(void) {
+    // Включаем тактирование GPIOA, AFIO, USART1
+    RCC->APB2ENR |= RCC_APB2ENR_IOPAEN | RCC_APB2ENR_AFIOEN | RCC_APB2ENR_USART1EN;
+    
+    // Никаких AFIO->MAPR для USART1 не трогаем!
+    // Настройка штатных пинов: PA9 (TX), PA10 (RX)
+    
+    // PA9  - Alternate function push-pull (50MHz) -> 0x0B
+    // PA10 - Input floating -> 0x04
+    GPIOA->CRH &= ~(0x00000FF0); 
+    GPIOA->CRH |=  (0x000000B0) | (0x00000400); // PA9: 0xB, PA10: 0x4
+    
+    // Baudrate 115200 при F_CPU = 72MHz (BRR = 72000000 / 115200 = 625 = 0x271)
+    USART1->BRR = 0x0271;
+    USART1->CR1 = USART_CR1_TE | USART_CR1_UE;
+}
+
+void UART1_SendString(char* str) {
+    while(*str) {
+        while(!(USART1->SR & USART_SR_TXE));
+        USART1->DR = (*str++);
+    }
+}
+
+void GPIO_Inputs_Init(void) {
+    RCC->APB2ENR |= RCC_APB2ENR_IOPAEN | RCC_APB2ENR_IOPBEN;
+    
+    // Подтягиваем проверяемые цифровые пины (Pull-Up)
+    // PA15
+    GPIOA->CRH &= ~(0xF0000000); GPIOA->CRH |= (0x08 << 28); GPIOA->ODR |= (1 << 15); 
+    // PB3, PB4, PB5, PB6, PB7, PB8, PB12
+    GPIOB->CRL &= ~(0xFFFFF000); GPIOB->CRL |= (0x08 << 12) | (0x08 << 16) | (0x08 << 20) | (0x08 << 24) | (0x08 << 28);
+    GPIOB->CRH &= ~(0x000F000F); GPIOB->CRH |= (0x08 << 0) | (0x08 << 16);
+    
+    GPIOB->ODR |= (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7) | (1 << 8) | (1 << 12);
+}
+
+void ADC_Init_Test(void) {
+    RCC->APB2ENR |= RCC_APB2ENR_ADC1EN;
+    
+    // Аналоговые входы: PA2, PA3, PA4, PA5, PA6, PA7, PB0, PB1
+    GPIOA->CRL &= ~(0x0FFFFF00); 
+    GPIOB->CRL &= ~(0x000000FF); 
+    
+    ADC1->CR2 |= ADC_CR2_ADON;
+}
+
+uint16_t Read_ADC1_Single(uint8_t channel) {
+    ADC1->SQR3 = channel;
+    ADC1->CR2 |= ADC_CR2_ADON;
+    while(!(ADC1->SR & ADC_SR_EOC));
+    return (uint16_t)ADC1->DR;
+}
+
+int main(void) {
+    UART1_Init_NoRemap();
+    GPIO_Inputs_Init();
+    ADC_Init_Test();
+    
+    char buffer[220];
+    
+    while(1) {
+        // Опрос всех аналоговых каналов
+        uint16_t a2 = Read_ADC1_Single(2);
+        uint16_t a3 = Read_ADC1_Single(3);
+        uint16_t a4 = Read_ADC1_Single(4);
+        uint16_t a5 = Read_ADC1_Single(5);
+        uint16_t a6 = Read_ADC1_Single(6);
+        uint16_t a7 = Read_ADC1_Single(7);
+        uint16_t b0 = Read_ADC1_Single(8);
+        uint16_t b1 = Read_ADC1_Single(9);
+        
+        // Чтение цифровых входов (включая PB6 и PB7, которые теперь обычные GPIO)
+        uint8_t pa15 = (GPIOA->IDR & (1 << 15)) ? 1 : 0;
+        uint8_t pb3  = (GPIOB->IDR & (1 << 3))  ? 1 : 0;
+        uint8_t pb4  = (GPIOB->IDR & (1 << 4))  ? 1 : 0;
+        uint8_t pb5  = (GPIOB->IDR & (1 << 5))  ? 1 : 0;
+        uint8_t pb6  = (GPIOB->IDR & (1 << 6))  ? 1 : 0;
+        uint8_t pb7  = (GPIOB->IDR & (1 << 7))  ? 1 : 0;
+        uint8_t pb8  = (GPIOB->IDR & (1 << 8))  ? 1 : 0;
+        uint8_t pb12 = (GPIOB->IDR & (1 << 12)) ? 1 : 0;
+        
+        sprintf(buffer, 
+            "{\"ADC\":{\"PA2\":%d,\"PA3\":%d,\"PA4\":%d,\"PA5\":%d,\"PA6\":%d,\"PA7\":%d,\"PB0\":%d,\"PB1\":%d},"
+            "\"GPIO\":{\"PA15\":%d,\"PB3\":%d,\"PB4\":%d,\"PB5\":%d,\"PB6\":%d,\"PB7\":%d,\"PB8\":%d,\"PB12\":%d}}\r\n",
+            a2, a3, a4, a5, a6, a7, b0, b1, pa15, pb3, pb4, pb5, pb6, pb7, pb8, pb12
+        );
+        
+        UART1_SendString(buffer);
+        
+        for(volatile int i = 0; i < 0x7FFFF; i++); // ~100мс
+    }
+}
